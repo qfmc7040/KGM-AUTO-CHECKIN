@@ -522,6 +522,28 @@ select.input { width: auto; min-width: 80px; }
   border-color: rgba(248, 81, 73, 0.45);
 }
 
+/* 公告入口有未读时同样脉冲，但用青色：红色是「过期/出错」的语义，未读公告不是故障 */
+#btn-ann.warn {
+  color: var(--cyan);
+  border-color: rgba(88, 166, 255, 0.45);
+}
+@keyframes ann-pulse {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(88, 166, 255, 0);
+    border-color: rgba(88, 166, 255, 0.45);
+  }
+  50% {
+    box-shadow: 0 0 0 4px rgba(88, 166, 255, 0.16);
+    border-color: var(--cyan);
+  }
+}
+#btn-ann.warn:not(.open) { animation: ann-pulse 2.4s ease-in-out infinite; }
+#btn-ann.open {
+  color: var(--cyan);
+  border-color: var(--cyan);
+  background: rgba(88, 166, 255, 0.12);
+}
+
 /* 有失效账号时轻微脉冲，提示这里可以点；展开后停止，避免一直闪 */
 @keyframes expired-pulse {
   0%, 100% {
@@ -541,6 +563,7 @@ select.input { width: auto; min-width: 80px; }
 }
 @media (prefers-reduced-motion: reduce) {
   .chip-btn.warn:not(.open) { animation: none; }
+  #btn-ann.warn:not(.open) { animation: none; }
 }
 
 /* 过期清单：走文档流，展开时把标签页与主内容整体下推，不覆盖任何内容 */
@@ -590,6 +613,95 @@ select.input { width: auto; min-width: 80px; }
 .expired-item .expired-at { color: var(--dim); font-size: 12px; white-space: nowrap; }
 .expired-empty { padding: 14px 12px; text-align: center; }
 .expired-pop .tip { margin: 0; font-size: 12px; }
+
+/* ── 站点公告 ── */
+/* 公告清单复用 .expired-pop 的版式，这里只补公告条目自身的样式 */
+.ann-item {
+  padding: 10px 12px;
+  border-bottom: 1px dashed var(--border);
+}
+.ann-item:last-child { border-bottom: none; }
+.ann-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.ann-title {
+  color: var(--text);
+  font-weight: bold;
+  /* 标题可能很长，允许在任意位置换行而不是撑破面板 */
+  overflow-wrap: anywhere;
+}
+/* 未读公告用左侧色条与更亮的标题区分，已读的自动弱化 */
+.ann-item.unread { background: rgba(88, 166, 255, 0.06); }
+.ann-item.unread .ann-title { color: var(--cyan); }
+.ann-dot { color: var(--red); font-size: 10px; }
+.ann-meta { font-size: 12px; }
+.ann-body {
+  margin-top: 4px;
+  color: var(--dim);
+  /* 正文按纯文本渲染，必须保留换行（textContent 不会把 \n 变成 <br>） */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.ann-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+/* 级别着色：err 用红色边框，让重要公告在列表里跳出来 */
+.ann-item.warn { border-left: 3px solid var(--yellow); }
+.ann-item.err { border-left: 3px solid var(--red); }
+.ann-item.info { border-left: 3px solid var(--border); }
+/* ── 站点公告（弹窗） ── */
+/* 复用 .auth-dialog 的外观与 ::backdrop，只补宽度、高度上限与列表滚动 */
+.ann-dialog {
+  min-width: min(520px, 92vw);
+  max-width: min(92vw, 760px);
+  /* 弹窗高度跟着内容走，但最多占视口的 80%，超出部分交给内部列表滚动 */
+  max-height: 80vh;
+  /* 关键：顶部全局重置 `* { margin: 0 }` 会盖掉浏览器默认样式给 dialog 的
+     `margin: auto`，配合 UA 的 position: fixed + inset: 0，弹窗会被顶到视口左上角。
+     这里显式恢复自动外边距，让弹窗在视口内水平 + 垂直居中。 */
+  margin: auto;
+}
+/* 只在打开时改 display：作者样式优先于 UA 样式，若无条件写 display: flex，
+   会盖掉浏览器默认的 dialog:not([open]) { display: none }，弹窗将无法关闭。
+   这里同时让 .auth-box 能在 max-height 内收缩，否则列表会顶破弹窗。 */
+.ann-dialog[open] {
+  display: flex;
+  flex-direction: column;
+}
+.ann-dialog .auth-box {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  /* 列表很长时由 .ann-list 滚动，弹窗自身不滚动，标题栏保持可见 */
+  overflow: hidden;
+}
+.ann-dialog .panel-head { margin-bottom: 12px; }
+/* 列表：内容超出时内部滚动，滚动条贴着弹窗边缘 */
+.ann-list {
+  flex: 1 1 auto;
+  min-height: 60px;
+  max-height: 56vh;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-inset);
+  padding: 0 4px;
+  margin-bottom: 14px;
+}
+.ann-dialog .row { margin-bottom: 0; justify-content: flex-end; }
+
+
+#announce-body {
+  width: 100%;
+  min-height: 90px;
+  resize: vertical;
+  line-height: 1.6;
+}
 
 @media (max-width: 560px) {
   .qr-card { width: 100%; }

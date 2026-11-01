@@ -21,6 +21,8 @@
       <span id="chip-run" class="chip">▮ 签到: --</span>
       <!-- 有过期账号时才出现；数据来自公开脱敏接口，不需要账号管理密码 -->
       <button id="btn-expired" class="chip chip-btn" hidden aria-expanded="false" title="点击查看登录已失效的账号清单（完整昵称 + 脱敏酷狗ID）">[ ⚠ 0 个账号已过期 · 点击查看 ▾ ]</button>
+      <!-- 有公告时出现；数字是「本浏览器未读」条数，已读状态存在 localStorage -->
+      <button id="btn-ann" class="chip chip-btn" hidden aria-expanded="false" title="点击查看站点公告">[ 📢 公告 0 · 点击查看 ]</button>
     </div>
   </header>
 
@@ -40,6 +42,7 @@
     <button class="tab" data-tab="phone"><span class="tab-icon">▚</span>手机号登录</button>
     <button class="tab" data-tab="run"><span class="tab-icon">▚</span>一键签到</button>
     <button class="tab" data-tab="accounts"><span class="tab-icon">▚</span>账号管理</button>
+    <button class="tab" data-tab="announce"><span class="tab-icon">▚</span>公告管理</button>
   </nav>
 
   <main>
@@ -173,6 +176,62 @@
 
       <p class="tip">⚠ 未修改过密码的账号默认密码为酷狗ID，建议登录后立即修改；token 已脱敏显示；删除账号不影响酷狗 APP 登录状态</p>
     </section>
+
+    <!-- 公告管理（需 admin，普通账号会看到锁屏） -->
+    <section id="panel-announce" class="panel">
+      <div class="panel-head"><span class="comment">// 公告管理</span><span class="dim"> — Admin</span></div>
+
+      <div id="announce-lock" hidden>
+        <div class="lock-box">
+          <div class="lock-icon">🔒</div>
+          <div class="row">
+            <span class="prompt-mark">$</span>
+            <input id="announce-id" class="input" type="text" value="admin" autocomplete="off" />
+          </div>
+          <div class="row">
+            <span class="prompt-mark">$</span>
+            <input id="announce-pwd" class="input" type="password" placeholder="admin 密码" autocomplete="off" />
+          </div>
+          <div class="row">
+            <button id="btn-announce-unlock" class="btn primary">[ 解 锁 ]</button>
+            <span id="announce-lock-msg" class="dim"></span>
+        </div>
+      </div>
+
+      <div id="announce-content" hidden>
+        <div class="row">
+          <input id="announce-title" class="input" type="text" maxlength="100"
+                 placeholder="标题（可留空，仅写正文）" autocomplete="off" />
+        </div>
+        <div class="row">
+          <textarea id="announce-body" class="input" rows="5" maxlength="2000"
+                    placeholder="正文（纯文本，支持换行；不超过 2000 字）"></textarea>
+        </div>
+        <div class="row">
+          <label class="inline-label" for="announce-level">级别</label>
+          <select id="announce-level" class="input">
+            <option value="info">info · 普通</option>
+            <option value="warn">warn · 提醒</option>
+            <option value="err">err · 重要</option>
+          </select>
+          <label class="inline-label"><input id="announce-pinned" type="checkbox" /> 置顶</label>
+          <label class="inline-label"><input id="announce-draft" type="checkbox" /> 存为草稿</label>
+        </div>
+        <div class="row">
+          <button id="btn-announce-save" class="btn primary">[ 发 布 ]</button>
+          <button id="btn-announce-reset" class="btn ghost">[ 清空表单 ]</button>
+          <span id="announce-edit-hint" class="dim"></span>
+        </div>
+
+        <div class="row">
+          <span class="comment">// 已有公告</span>
+          <span id="announce-count" class="dim"></span>
+        </div>
+        <div id="announce-list">
+          <div class="empty dim">// 加载中…</div>
+        </div>
+      </div>
+    </section>
   </main>
 
 <footer class="footer">
@@ -183,6 +242,21 @@
 </footer>
 
   <div id="toast" class="toast"></div>
+
+  <!-- 站点公告（弹窗）：顶部入口按钮唤起，带遮罩、Esc 与「关闭」按钮均可关闭 -->
+  <dialog id="ann-dialog" class="auth-dialog ann-dialog">
+    <div class="auth-box">
+      <div class="panel-head">
+        <span class="comment">// 站点公告</span>
+        <span id="ann-count" class="dim"></span>
+        <button id="btn-ann-readall" class="btn ghost">[ 全部标为已读 ]</button>
+      </div>
+      <div id="ann-list" class="ann-list"></div>
+      <div class="row">
+        <button id="btn-ann-close" class="btn primary">[ 关 闭 ]</button>
+      </div>
+    </div>
+  </dialog>
 
   <!-- 访问密码 -->
   <dialog id="auth-dialog" class="auth-dialog">

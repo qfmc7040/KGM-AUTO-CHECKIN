@@ -56,6 +56,17 @@ import { printGreen, printMagenta, printRed, printYellow } from '../utils/colorO
 import { nextCronRuns } from '../utils/date.js'
 import { clearInvalidCredential, readCheckinStatus } from '../utils/checkinStatus.js'
 import {
+  MAX_BODY_LENGTH,
+  MAX_ITEMS,
+  MAX_TITLE_LENGTH,
+  normalizeAnnouncement,
+  readAnnouncements,
+  sortAnnouncements,
+  validateAnnouncement,
+  visibleAnnouncements,
+  writeAnnouncements,
+} from '../utils/announcements.js'
+import {
   buildEmailCodeMail,
   clearMailNotice,
   genEmailCode,
@@ -1122,6 +1133,140 @@ app.get('/api/expired', wrap(async (req, res) => {
   res.json({ count: accounts.length, accounts })
 }))
 
+// ── 站点公告 ──
+// 读取无需任何账号（登录页外的访客也能看到公告），但仍受全局访问密码保护；
+// 发布 / 修改 / 删除必须通过 admin 验证，且与「账号管理」「全量签到」共用同一套
+// 防爆破计数桶（failsByIp / failsByAcct('admin')），不额外发明权限模型。
+
+/** 公告文件路径：与 checkinStatusFile 同样的推导方式，跟随 USERINFO_FILE 所在目录 */
+function announcementsFile() {
+  const base = process.env.USERINFO_FILE
+    ? path.dirname(process.env.USERINFO_FILE)
+    : path.join(ROOT, 'data')
+  return path.join(base, 'announcements.json')
+}
+
+/** 读取全部公告（含草稿）；文件损坏时返回空列表，不抛异常 */
+function readAnnouncementItems() {
+  return readAnnouncements(announcementsFile())
+}
+
+/** admin 校验失败时抛出与其它管理接口一致的错误（423=锁定，401=未通过验证） */
+function requireAnnouncementAdmin(req) {
+  const admin = verifyAdminGuarded(req)
+  if (admin.scope) return admin.scope
+  const err = new Error(admin.message)
+  err.status = admin.locked ? 423 : 401
+  err.code = admin.locked ? 'accounts-auth' : 'admin-required'
+  if (admin.retryAfter > 0) err.retryAfterMs = admin.retryAfter * 1000
+  throw err
+}
+
+/** 把规范化后的公告落盘；失败时抛 500（公告文件不可写是服务端问题，不该静默吞掉） */
+function persistAnnouncements(items) {
+  const result = writeAnnouncements(announcementsFile(), items)
+  if (!result.ok) {
+    printRed(`[webui] 写入公告文件失败：${result.error}`)
+    const err = new Error('公告保存失败：无法写入数据文件，请检查 data 目录权限')
+    err.status = 500
+    throw err
+  }
+}
+
+/**
+ * 公告列表（公开，不需要账号验证）。
+ * 只返回非草稿公告：草稿是管理员写着还没发布的内容，不能提前泄漏给访客。
+ */
+app.get('/api/announcements', wrap(async (req, res) => {
+  const { items, updatedAt } = readAnnouncementItems()
+  const visible = visibleAnnouncements(items)
+  res.json({
+    count: visible.length,
+    updatedAt,
+    // 字段逐个挑出来返回，避免以后往文件里加了内部字段就被顺手暴露出去
+    items: visible.map(it => ({
+      id: it.id,
+      title: it.title,
+      body: it.body,
+      level: it.level,
+      pinned: it.pinned,
+      createdAt: it.createdAt,
+      updatedAt: it.updatedAt,
+    })),
+  })
+}))
+
+/** 公告管理列表（admin）：含草稿，供「公告管理」标签页编辑 */
+app.get('/api/announcements/manage', wrap(async (req, res) => {
+  requireAnnouncementAdmin(req)
+  const { items, updatedAt } = readAnnouncementItems()
+  res.json({
+    count: items.length,
+    updatedAt,
+    limits: { title: MAX_TITLE_LENGTH, body: MAX_BODY_LENGTH, items: MAX_ITEMS },
+    items: sortAnnouncements(items),
+  })
+}))
+
+/** 发布公告（admin） */
+app.post('/api/announcements', wrap(async (req, res) => {
+  requireAnnouncementAdmin(req)
+  const { items } = readAnnouncementItems()
+  if (items.length >= MAX_ITEMS) {
+    const err = new Error(`公告数量已达上限（${MAX_ITEMS} 条），请先删除不再需要的公告`)
+    err.status = 400
+    throw err
+  }
+  const item = normalizeAnnouncement(req.body || {})
+  const check = validateAnnouncement(item)
+  if (!check.ok) {
+    const err = new Error(check.error)
+    err.status = 400
+    throw err
+  }
+  persistAnnouncements([...items, item])
+  res.status(201).json({ ok: true, item })
+}))
+
+/** 修改公告（admin）：id 与 createdAt 保持不变，其余字段整体覆盖 */
+app.put('/api/announcements/:id', wrap(async (req, res) => {
+  requireAnnouncementAdmin(req)
+  const id = String(req.params.id || '').trim()
+  const { items } = readAnnouncementItems()
+  const index = items.findIndex(it => it.id === id)
+  if (index < 0) {
+    const err = new Error('公告不存在或已被删除')
+    err.status = 404
+    throw err
+  }
+  const item = normalizeAnnouncement(req.body || {}, { id, createdAt: items[index].createdAt })
+  const check = validateAnnouncement(item)
+  if (!check.ok) {
+    const err = new Error(check.error)
+    err.status = 400
+    throw err
+  }
+  const next = [...items]
+  next[index] = item
+  persistAnnouncements(next)
+  res.json({ ok: true, item })
+}))
+
+/** 删除公告（admin） */
+app.delete('/api/announcements/:id', wrap(async (req, res) => {
+  requireAnnouncementAdmin(req)
+  const id = String(req.params.id || '').trim()
+  const { items } = readAnnouncementItems()
+  const next = items.filter(it => it.id !== id)
+  if (next.length === items.length) {
+    const err = new Error('公告不存在或已被删除')
+    err.status = 404
+    throw err
+  }
+  persistAnnouncements(next)
+  res.json({ ok: true, deleted: id, count: next.length })
+}))
+
 // ── 扫码登录 ──
 // qr/key → qr/check 之间的设备标识映射（内存暂存，重启即失效；容量上限防泄漏增长）
 const pendingQrDevices = new Map()
@@ -1881,6 +2026,13 @@ app.listen(WEBUI_PORT, () => {
     printYellow(`  手动签到配额: 每账号每天 ${CHECKIN_PER_USERID_DAILY} 次（按北京时间跨天重置）`)
   } else {
     printYellow('  手动签到配额: 已关闭（CHECKIN_PER_USERID_DAILY=0）')
+  }
+  // 启动时读一次公告文件：文件缺失 / 损坏都会走空列表，所以这行永远打得出来，
+  // 也能让管理员一眼确认「公告文件到底被读到了几条」，不用打开页面去数。
+  {
+    const ann = readAnnouncementItems().items
+    const annVisible = visibleAnnouncements(ann).length
+    printYellow(`  站点公告: 共 ${ann.length} 条（对外可见 ${annVisible} 条，草稿 ${ann.length - annVisible} 条）· 文件 ${announcementsFile()}`)
   }
 
   if (cron.validate(SCHEDULE)) {

@@ -77,6 +77,8 @@ async function submitAuth() {
 
 let ACCOUNTS_KEY = sessionStorage.getItem('kc_accts') || ''
 let ACCOUNTS_ID = sessionStorage.getItem('kc_accts_id') || ''
+/** 公告已读记录（localStorage）：按浏览器记，不跟账号绑定，匿名访客同样适用 */
+const ANN_READ_KEY = 'kc_ann_read'
 
 async function api(path, opts = {}) {
   const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) }
@@ -100,6 +102,22 @@ async function api(path, opts = {}) {
     throw err
   }
   return data
+}
+
+/**
+ * 构造带指定账号凭据的请求参数供 api() 使用。
+ * 场景：公告管理面板要固定用「面板里输入的那组 admin 凭据」，
+ * 而不是 api() 默认会附加的全局 ACCOUNTS_KEY（可能是别的账号的密码）。
+ * 只传入非空值，空值时让 api() 走默认逻辑。
+ * @param {string} accountsId
+ * @param {string} accountsKey
+ * @returns {{headers: object}}
+ */
+function credOpts(accountsId, accountsKey) {
+  const headers = {}
+  if (accountsId) headers['X-Accounts-Id'] = accountsId
+  if (accountsKey) headers['X-Accounts-Key'] = accountsKey
+  return { headers }
 }
 
 let toastTimer = null
@@ -142,6 +160,7 @@ $$('.tab').forEach(tab => {
     $$('.tab').forEach(t => t.classList.toggle('active', t === tab))
     $$('.panel').forEach(p => p.classList.toggle('active', p.id === `panel-${tab.dataset.tab}`))
     if (tab.dataset.tab === 'accounts') loadAccounts()
+    if (tab.dataset.tab === 'announce') openAnnounceTab()
   })
 })
 
@@ -1270,13 +1289,449 @@ $('#btn-expired').addEventListener('click', ev => {
 // Esc 收起
 document.addEventListener('keydown', ev => {
   if (ev.key === 'Escape' && isExpiredOpen()) setExpiredOpen(false)
+  // 公告弹窗的 Esc 由 <dialog> 自身的 cancel 事件处理，这里不重复接管
 })
+
+/* ────────────────── 站点公告 ────────────────── */
+
+/**
+ * 已读记录只存浏览器本地（localStorage），服务端不保存任何「谁读过」的信息：
+ * 公告对匿名访客同样可见，没有账号可绑定，也没必要多存一份隐私数据。
+ * 读取时统一丢弃非字符串项，防止被手工改坏的 localStorage 内容影响判断。
+ * @returns {string[]}
+ */
+function getReadAnnIds() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(ANN_READ_KEY) || '[]')
+    return Array.isArray(raw) ? raw.map(String) : []
+  } catch {
+    return []
+  }
+}
+
+/** @param {string} id */
+function markAnnRead(id) {
+  const set = new Set(getReadAnnIds())
+  set.add(String(id))
+  try { localStorage.setItem(ANN_READ_KEY, JSON.stringify([...set])) } catch { /* 隐私模式下写不进去，忽略 */ }
+}
+
+/** 按 id 记录公告正文，供「查看全文」按钮按需取用（列表里可能只显示摘要） */
+const annCache = new Map()
+
+/** 刷新公告缓存与顶栏入口；拉取失败保留上一次结果，避免一次抖动就清空入口 */
+async function refreshAnnouncements() {
+  try {
+    const r = await api('/api/announcements')
+    annCache.clear()
+    for (const it of (Array.isArray(r.items) ? r.items : [])) annCache.set(String(it.id), it)
+  } catch {
+    return
+  }
+  updateAnnBadge()
+  if (isAnnOpen()) renderAnnList()
+}
+
+/** 更新顶栏入口文案：未读 > 0 时显示未读数并脉冲，全部已读后按钮自动隐藏 */
+function updateAnnBadge() {
+  const btn = $('#btn-ann')
+  if (!btn) return
+  const read = new Set(getReadAnnIds())
+  const unread = [...annCache.values()].filter(it => !read.has(String(it.id))).length
+  const total = annCache.size
+  if (!total) {
+    btn.hidden = true
+    setAnnOpen(false)
+    return
+  }
+  btn.hidden = false
+  btn.textContent = unread > 0
+    ? `[ 📢 ${unread} 条未读公告 · 点击查看 ]`
+    : `[ 📢 公告 ${total} 条 · 点击查看 ]`
+  btn.classList.toggle('warn', unread > 0)
+}
+
+/** @returns {boolean} 公告弹窗是否打开 */
+function isAnnOpen() {
+  const dlg = $('#ann-dialog')
+  return Boolean(dlg) && dlg.open
+}
+
+/**
+ * 打开 / 关闭公告弹窗。
+ * 用原生 <dialog>.showModal()：自动带遮罩、焦点陷阱与 Esc 关闭，与访问密码/通知邮箱
+ * 弹窗是同一套机制，无需自己处理层级与外部点击。
+ */
+function setAnnOpen(open) {
+  const dlg = $('#ann-dialog')
+  if (!dlg) return
+  if (open) {
+    if (!dlg.open) dlg.showModal()
+    renderAnnList()
+  } else if (dlg.open) {
+    dlg.close()
+  }
+  const btn = $('#btn-ann')
+  if (btn) {
+    btn.setAttribute('aria-expanded', String(Boolean(open)))
+    // .chip-btn.open 会停止脉冲动画（与过期清单同一套样式），打开时不该继续闪
+    btn.classList.toggle('open', Boolean(open))
+  }
+}
+
+/**
+ * 渲染公告列表。
+ * 正文一律用 textContent 写入：公告内容来自管理员，一旦允许 HTML 就等于给出一个
+ * 稳定的存储型 XSS 入口，所以这里宁可放弃富文本能力。
+ */
+function renderAnnList() {
+  const box = $('#ann-list')
+  if (!box) return
+  const list = [...annCache.values()].sort((a, b) => {
+    if (a.pinned !== b.pinned) return a.pinned ? -1 : 1
+    return (Date.parse(b.createdAt) || 0) - (Date.parse(a.createdAt) || 0)
+  })
+  const read = new Set(getReadAnnIds())
+  const unread = list.filter(it => !read.has(String(it.id))).length
+  $('#ann-count').textContent = unread > 0
+    ? `// 共 ${list.length} 条 · ${unread} 条未读`
+    : `// 共 ${list.length} 条 · 全部已读`
+
+  box.textContent = ''
+  if (!list.length) {
+    const empty = document.createElement('div')
+    empty.className = 'empty dim'
+    empty.textContent = '// 暂无公告'
+    box.appendChild(empty)
+    return
+  }
+
+  for (const it of list) {
+    const item = document.createElement('div')
+    item.className = `ann-item ${it.level || 'info'}`
+    if (!read.has(String(it.id))) item.classList.add('unread')
+
+    const head = document.createElement('div')
+    head.className = 'ann-head'
+    const title = document.createElement('span')
+    title.className = 'ann-title'
+    title.textContent = it.title || '（无标题）'
+    head.appendChild(title)
+    // 未读圆点：纯装饰，已读后移除
+    if (!read.has(String(it.id))) {
+      const dot = document.createElement('span')
+      dot.className = 'ann-dot'
+      dot.textContent = '●'
+      head.appendChild(dot)
+    }
+    // 级别与置顶标记跟着标题，便于一眼分辨重要公告
+    const meta = document.createElement('span')
+    meta.className = 'ann-meta dim'
+    meta.textContent = ` ${it.pinned ? '置顶 · ' : ''}${it.level} · ${formatTime(it.createdAt)}`
+    head.appendChild(meta)
+    item.appendChild(head)
+
+    const body = document.createElement('div')
+    body.className = 'ann-body'
+    body.textContent = it.body || ''
+    item.appendChild(body)
+
+    if (!read.has(String(it.id))) {
+      const row = document.createElement('div')
+      row.className = 'ann-actions'
+      const btn = document.createElement('button')
+      btn.className = 'btn ghost'
+      btn.textContent = '[ 标为已读 ]'
+      btn.addEventListener('click', () => {
+        markAnnRead(it.id)
+        updateAnnBadge()
+        renderAnnList()
+      })
+      row.appendChild(btn)
+      item.appendChild(row)
+    }
+
+    box.appendChild(item)
+  }
+}
+
+/** 把 ISO 时间转成本地可读格式；解析失败时原样显示，不显示 NaN */
+function formatTime(iso) {
+  const t = Date.parse(iso)
+  if (!Number.isFinite(t)) return String(iso || '')
+  const d = new Date(t)
+  const p = n => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+}
+
+function toggleAnnDialog() {
+  const next = !isAnnOpen()
+  setAnnOpen(next)
+  // 打开时重新拉一次：可能刚有人发布了新公告
+  if (next) refreshAnnouncements().then(() => { if (isAnnOpen()) renderAnnList() })
+}
+
+$('#btn-ann').addEventListener('click', () => toggleAnnDialog())
+
+// 弹窗内的「关闭」按钮
+$('#btn-ann-close').addEventListener('click', () => setAnnOpen(false))
+
+// Esc：拦截默认关闭，改为走统一的关闭路径，保证顶部入口的高亮状态同步复位
+$('#ann-dialog').addEventListener('cancel', e => {
+  e.preventDefault()
+  setAnnOpen(false)
+})
+
+// 点击遮罩（即点击 dialog 自身、而非内部 .auth-box）也关闭
+$('#ann-dialog').addEventListener('click', e => {
+  if (e.target === $('#ann-dialog')) setAnnOpen(false)
+})
+
+// 展开公告不影响别处；「全部标为已读」把当前所有公告 id 写进本地已读集合
+$('#btn-ann-readall').addEventListener('click', ev => {
+  ev.stopPropagation()
+  const all = [...annCache.keys()]
+  if (!all.length) return
+  try { localStorage.setItem(ANN_READ_KEY, JSON.stringify(all)) } catch { /* 同 markAnnRead */ }
+  updateAnnBadge()
+  renderAnnList()
+})
+
+/* ────────────────── 公告管理（需 admin）────────────────── */
+
+/** 公告管理面板当前使用的 admin 凭据（独立于账号管理面板，避免互相覆盖） */
+let ANN_ID = ''
+let ANN_KEY = ''
+/** 正在编辑的公告 id；为空表示「新建」 */
+let annEditingId = ''
+
+/** 打开「公告管理」标签页：没有凭据就先显示锁屏，有凭据直接加载列表 */
+function openAnnounceTab() {
+  if (ANN_KEY) loadAnnounceManage()
+  else showAnnounceLock('')
+}
+
+function showAnnounceLock(msg, isErr) {
+  $('#announce-lock').hidden = false
+  $('#announce-content').hidden = true
+  const el = $('#announce-lock-msg')
+  el.textContent = msg || ''
+  el.className = isErr ? 'err' : 'dim'
+}
+
+async function tryUnlockAnnounce() {
+  const btn = $('#btn-announce-unlock')
+  if (btn.disabled) return
+  const id = $('#announce-id').value.trim() || 'admin'
+  const key = $('#announce-pwd').value.trim()
+  if (!key) {
+    showAnnounceLock('// 请输入 admin 密码', true)
+    return
+  }
+  btn.disabled = true
+  try {
+    // 用 /api/accounts/unlock 校验：它与公告接口共用同一套 admin 校验与锁定计数，
+    // 通过后再调公告接口就不会因为凭据格式不同而莫名 401
+    await api('/api/accounts/unlock', {
+      method: 'POST',
+      body: JSON.stringify({ userid: id, password: key }),
+    })
+    ANN_ID = id
+    ANN_KEY = key
+    $('#announce-pwd').value = ''
+    await loadAnnounceManage()
+  } catch (e) {
+    if (e.status === 423) {
+      showAnnounceLock(`// ${e.message}`, true)
+      btn.disabled = false
+      return
+    }
+    showAnnounceLock(`// ${e.message}`, true)
+    btn.disabled = false
+  }
+}
+
+$('#btn-announce-unlock').addEventListener('click', tryUnlockAnnounce)
+$('#announce-pwd').addEventListener('keydown', e => { if (e.key === 'Enter') tryUnlockAnnounce() })
+
+/** 拉取公告管理列表（含草稿）；423/401 分别落到锁屏提示 */
+async function loadAnnounceManage() {
+  try {
+    const r = await api('/api/announcements/manage', credOpts(ANN_ID, ANN_KEY))
+    $('#announce-lock').hidden = true
+    $('#announce-content').hidden = false
+    renderAnnounceManage(Array.isArray(r.items) ? r.items : [])
+  } catch (e) {
+    if (e.status === 423 || e.status === 401) {
+      ANN_KEY = ''
+      showAnnounceLock(e.status === 423 ? `// ${e.message}` : '', e.status === 423)
+      return
+    }
+    showAnnounceLock(`// 加载失败：${e.message}`, true)
+  }
+}
+
+/** 渲染管理列表：每条带「编辑 / 删除」，未读角标与访客视角无关（这里看草稿状态） */
+function renderAnnounceManage(items) {
+  const box = $('#announce-list')
+  const sorted = [...items].sort((a, b) => {
+    if (a.pinned !== b.pinned) return a.pinned ? -1 : 1
+    return (Date.parse(b.createdAt) || 0) - (Date.parse(a.createdAt) || 0)
+  })
+  $('#announce-count').textContent = `// 共 ${sorted.length} 条`
+  box.textContent = ''
+  if (!sorted.length) {
+    const empty = document.createElement('div')
+    empty.className = 'empty dim'
+    empty.textContent = '// 还没有公告，填写上方表单即可发布第一条'
+    box.appendChild(empty)
+    return
+  }
+  for (const it of sorted) {
+    const row = document.createElement('div')
+    row.className = `ann-item ${it.level || 'info'}`
+
+    const head = document.createElement('div')
+    head.className = 'ann-head'
+    const title = document.createElement('span')
+    title.className = 'ann-title'
+    title.textContent = it.title || '（无标题）'
+    head.appendChild(title)
+    const meta = document.createElement('span')
+    meta.className = 'ann-meta dim'
+    meta.textContent = ` ${it.pinned ? '置顶 · ' : ''}${it.level}${it.draft ? ' · 草稿' : ''} · ${formatTime(it.createdAt)}`
+    head.appendChild(meta)
+    row.appendChild(head)
+
+    const body = document.createElement('div')
+    body.className = 'ann-body'
+    body.textContent = it.body || ''
+    row.appendChild(body)
+
+    const actions = document.createElement('div')
+    actions.className = 'ann-actions'
+    const editBtn = document.createElement('button')
+    editBtn.className = 'btn ghost'
+    editBtn.textContent = '[ 编辑 ]'
+    editBtn.addEventListener('click', () => startEditAnnounce(it))
+    const delBtn = document.createElement('button')
+    delBtn.className = 'btn ghost'
+    delBtn.textContent = '[ 删除 ]'
+    delBtn.addEventListener('click', () => deleteAnnounce(it))
+    actions.appendChild(editBtn)
+    actions.appendChild(delBtn)
+    row.appendChild(actions)
+
+    box.appendChild(row)
+  }
+}
+
+/** 把一条公告载入表单进入编辑态（按钮文案随之改为「保存修改」） */
+function startEditAnnounce(it) {
+  annEditingId = it.id
+  $('#announce-title').value = it.title || ''
+  $('#announce-body').value = it.body || ''
+  $('#announce-level').value = it.level || 'info'
+  $('#announce-pinned').checked = it.pinned === true
+  $('#announce-draft').checked = it.draft === true
+  $('#announce-edit-hint').textContent = `// 正在编辑：${it.title || '（无标题）'}`
+  $('#btn-announce-save').textContent = '[ 保存修改 ]'
+  $('#announce-title').focus()
+}
+
+/** 清空表单回到新建态 */
+function resetAnnounceForm() {
+  annEditingId = ''
+  $('#announce-title').value = ''
+  $('#announce-body').value = ''
+  $('#announce-level').value = 'info'
+  $('#announce-pinned').checked = false
+  $('#announce-draft').checked = false
+  $('#announce-edit-hint').textContent = ''
+  $('#btn-announce-save').textContent = '[ 发 布 ]'
+}
+
+$('#btn-announce-reset').addEventListener('click', resetAnnounceForm)
+
+$('#btn-announce-save').addEventListener('click', async () => {
+  const btn = $('#btn-announce-save')
+  if (btn.disabled) return
+  const title = $('#announce-title').value.trim()
+  const body = $('#announce-body').value.trim()
+  if (!title && !body) {
+    toast('标题与正文不能同时为空', 'err')
+    return
+  }
+  const payload = {
+    title,
+    body,
+    level: $('#announce-level').value,
+    pinned: $('#announce-pinned').checked,
+    draft: $('#announce-draft').checked,
+  }
+  const editing = annEditingId
+  btn.disabled = true
+  try {
+    if (editing) {
+      await api(`/api/announcements/${encodeURIComponent(editing)}`, {
+        method: 'PUT',
+        body: JSON.stringify(payload),
+        ...credOpts(ANN_ID, ANN_KEY),
+      })
+      toast('公告已更新', 'ok')
+    } else {
+      await api('/api/announcements', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+        ...credOpts(ANN_ID, ANN_KEY),
+      })
+      toast(payload.draft ? '已存为草稿（访客看不到）' : '公告已发布', 'ok')
+    }
+    resetAnnounceForm()
+    await loadAnnounceManage()
+    // 管理端改动后同步刷新访客视角的顶栏入口
+    await refreshAnnouncements()
+  } catch (e) {
+    handleAnnWriteError(e)
+  } finally {
+    btn.disabled = false
+  }
+})
+
+/** 删除公告：不可逆操作，必须二次确认 */
+async function deleteAnnounce(it) {
+  const label = it.title || '（无标题）'
+  if (!confirm(`确认删除公告「${label}」？此操作不可撤销。`)) return
+  try {
+    await api(`/api/announcements/${encodeURIComponent(it.id)}`, {
+      method: 'DELETE',
+      ...credOpts(ANN_ID, ANN_KEY),
+    })
+    toast('公告已删除', 'ok')
+    if (annEditingId === it.id) resetAnnounceForm()
+    await loadAnnounceManage()
+    await refreshAnnouncements()
+  } catch (e) {
+    handleAnnWriteError(e)
+  }
+}
+
+/** 写操作失败的统一处理：锁定 / 未授权落回锁屏，其余只弹提示 */
+function handleAnnWriteError(e) {
+  if (e.status === 423 || e.status === 401) {
+    ANN_KEY = ''
+    showAnnounceLock(e.status === 423 ? `// ${e.message}` : '// 登录状态已失效，请重新输入 admin 密码', true)
+    return
+  }
+  toast(e.message || '操作失败', 'err')
+}
 
 /* ────────────────── 启动 ────────────────── */
 
 function refreshAll() {
   refreshStatus()
   refreshExpired()
+  refreshAnnouncements()
   connectSse()
 }
 
@@ -1284,8 +1739,10 @@ refreshAll()
 setInterval(refreshStatus, 5000)
 // 过期清单变化很慢（只在签到判定凭据失效时更新），60 秒拉一次足够
 setInterval(refreshExpired, 60000)
+// 公告可能被管理员随时发布，60 秒拉一次保持顶栏未读角标接近实时
+setInterval(refreshAnnouncements, 60000)
 
-// 支持 #qr / #phone / #run / #accounts 直达对应标签页
+// 支持 #qr / #phone / #run / #accounts / #announce 直达对应标签页
 const initialTab = location.hash.replace('#', '')
 const initialTabEl = $$('.tab').find(t => t.dataset.tab === initialTab)
 if (initialTabEl) initialTabEl.click()
