@@ -494,6 +494,11 @@ select.input { width: auto; min-width: 80px; }
   color: var(--text);
   padding: 20px;
   min-width: 320px;
+  /* 关键：顶部全局重置 `* { margin: 0 }` 会盖掉浏览器默认样式给 dialog 的
+     `margin: auto`，而 UA 的 position: fixed + inset: 0 正是靠它居中的，
+     少了这行弹窗会贴在视口左上角。三个弹窗（访问密码 / 通知邮箱 / 站点公告）
+     都用到这个类，改这里即可。 */
+  margin: auto;
 }
 .auth-dialog::backdrop { background: rgba(1, 4, 9, 0.7); }
 #auth-err:empty { display: none; }
@@ -661,10 +666,6 @@ select.input { width: auto; min-width: 80px; }
   max-width: min(92vw, 760px);
   /* 弹窗高度跟着内容走，但最多占视口的 80%，超出部分交给内部列表滚动 */
   max-height: 80vh;
-  /* 关键：顶部全局重置 `* { margin: 0 }` 会盖掉浏览器默认样式给 dialog 的
-     `margin: auto`，配合 UA 的 position: fixed + inset: 0，弹窗会被顶到视口左上角。
-     这里显式恢复自动外边距，让弹窗在视口内水平 + 垂直居中。 */
-  margin: auto;
 }
 /* 只在打开时改 display：作者样式优先于 UA 样式，若无条件写 display: flex，
    会盖掉浏览器默认的 dialog:not([open]) { display: none }，弹窗将无法关闭。
