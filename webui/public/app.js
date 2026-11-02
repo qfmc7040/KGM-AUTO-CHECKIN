@@ -230,6 +230,9 @@ function showAccountsLock(msg, isErr) {
   // 所以入口按钮与已打开的窗口都保留。
   accountsCache = []
   accountsAdmin = false
+  // 锁屏后列表已清空，「只看已过期」与页码也复位，下次解锁从完整列表第 1 页开始
+  accountsOnlyExpired = false
+  accountsPage = 1
   updateExpiredBadge()
 }
 
@@ -237,19 +240,41 @@ function showAccountsLock(msg, isErr) {
 let accountsCache = []
 let accountsAdmin = false
 let accountsSearch = ''
+/** 「只看已过期」开关：只保留登录凭据已失效（酷狗 20018）的账号，与搜索框叠加生效 */
+let accountsOnlyExpired = false
 /** 服务端是否配置了 SMTP：没配置就不让人点「绑定邮箱」，否则只会收到 503 */
 let mailConfigured = false
+
+/**
+ * 分页状态：列表只渲染当前页，账号多时不必一次性铺满。
+ * 页码以「筛选后的结果集」为基准，搜索或筛选变化时回到第 1 页。
+ */
+const ACCOUNTS_PAGE_SIZES = [20, 50, 100]
+const ACCOUNTS_PAGE_SIZE_KEY = 'kg-accounts-page-size'
+/** 每页条数（可选 20 / 50 / 100），默认 20；用户选择记忆在 localStorage */
+let accountsPageSize = (() => {
+  try {
+    const saved = parseInt(localStorage.getItem(ACCOUNTS_PAGE_SIZE_KEY), 10)
+    return ACCOUNTS_PAGE_SIZES.includes(saved) ? saved : ACCOUNTS_PAGE_SIZES[0]
+  } catch {
+    return ACCOUNTS_PAGE_SIZES[0] // 隐私模式下读不到 localStorage，用默认值
+  }
+})()
+/** 当前页码，从 1 开始；越界由 renderAccountList 统一收敛 */
+let accountsPage = 1
 
 /**
  * 按昵称或酷狗ID 过滤账号。
  * 两种字段都做「包含」匹配，且忽略大小写，便于输入部分 ID 或昵称片段。
  * @param {Array} list
  * @param {string} keyword
+ * @param {boolean} [onlyExpired] 只保留登录凭据已失效的账号（与关键字同时生效）
  */
-function filterAccounts(list, keyword) {
+function filterAccounts(list, keyword, onlyExpired) {
+  const base = onlyExpired ? list.filter(a => a.credentialInvalid) : list
   const kw = String(keyword || '').trim().toLowerCase()
-  if (!kw) return list
-  return list.filter(a => {
+  if (!kw) return base
+  return base.filter(a => {
     const id = String(a.rawUserid || '')
     const nick = String(a.nickname || '')
     return id.toLowerCase().includes(kw) || nick.toLowerCase().includes(kw)
@@ -280,6 +305,44 @@ function renderAccounts(accounts, admin, mustChangePassword, serverMailConfigure
   updateExpiredBadge()
 }
 
+/** 同步「只看已过期」按钮：显示过期数量，并标出开关是否打开 */
+function syncAccountsExpiredBtn(accounts) {
+  const btn = $('#btn-accounts-expired')
+  if (!btn) return
+  const total = accounts.filter(a => a.credentialInvalid).length
+  // 没有过期账号时按钮隐藏，避免点开一个永远为空的列表；
+  // 但开关已经打开时必须保留按钮，否则用户没有入口关掉筛选。
+  btn.hidden = total === 0 && !accountsOnlyExpired
+  btn.textContent = `[ ⚠ 只看已过期（${total}） ]`
+  btn.title = '只看登录凭据已失效（需重新扫码/手机号重新登录）的账号'
+  btn.setAttribute('aria-pressed', accountsOnlyExpired ? 'true' : 'false')
+}
+
+/**
+ * 同步分页栏：页码信息、上一页/下一页可用状态、每页条数下拉的选中值。
+ * total=0 时整条分页栏隐藏，避免空列表下方挂一排灰按钮。
+ * @param {number} total 筛选后的结果总数
+ * @param {number} totalPages 总页数（至少 1）
+ */
+function renderAccountsPager(total, totalPages) {
+  const pager = $('#accounts-pager')
+  if (!pager) return
+  pager.hidden = total === 0
+  const sel = $('#accounts-page-size')
+  if (sel) sel.value = String(accountsPageSize)
+  if (total === 0) return
+  const info = $('#accounts-page-info')
+  if (info) {
+    const start = (accountsPage - 1) * accountsPageSize + 1
+    const end = Math.min(total, accountsPage * accountsPageSize)
+    info.textContent = `// 第 ${accountsPage} / ${totalPages} 页 · 显示 ${start}-${end}，共 ${total} 条`
+  }
+  const prev = $('#btn-accounts-prev')
+  const next = $('#btn-accounts-next')
+  if (prev) prev.disabled = accountsPage <= 1
+  if (next) next.disabled = accountsPage >= totalPages
+}
+
 /** 仅重绘列表部分（搜索时调用，不重复处理外层状态） */
 function renderAccountList() {
   const box = $('#account-list')
@@ -294,24 +357,55 @@ function renderAccountList() {
     box.innerHTML = '<div class="empty dim">// 暂无账号，请先在「扫码登录」或「手机号登录」中添加</div>'
     const cnt = $('#accounts-search-count')
     if (cnt) cnt.textContent = ''
+    syncAccountsExpiredBtn(accounts)
+    renderAccountsPager(0, 0)
     return
   }
 
-  const shown = filterAccounts(accounts, accountsSearch)
+  const shown = filterAccounts(accounts, accountsSearch, accountsOnlyExpired)
   const cntEl = $('#accounts-search-count')
   if (cntEl) {
-    cntEl.textContent = accountsSearch.trim()
-      ? `// 匹配 ${shown.length} / ${accounts.length} 个账号`
-      : `// 共 ${accounts.length} 个账号`
+    const totalExpired = accounts.filter(a => a.credentialInvalid).length
+    if (accountsOnlyExpired) {
+      // 开关打开时，数字口径是「过期账号里匹配了几个」，避免被总数误导
+      const kw = accountsSearch.trim()
+      cntEl.textContent = kw
+        ? `// 已过期 ${shown.length} / ${totalExpired} 个账号（关键字已生效）`
+        : `// 只看已过期：${totalExpired} 个账号`
+    } else {
+      cntEl.textContent = accountsSearch.trim()
+        ? `// 匹配 ${shown.length} / ${accounts.length} 个账号`
+        : `// 共 ${accounts.length} 个账号`
+    }
   }
+  syncAccountsExpiredBtn(accounts)
 
   if (!shown.length) {
+    renderAccountsPager(0, 0)
+    if (accountsOnlyExpired) {
+      // 区分「一个都没过期」与「过期账号里没有关键字匹配」，否则用户会以为筛选坏了
+      const kw = accountsSearch.trim()
+      const totalExpired = accounts.filter(a => a.credentialInvalid).length
+      box.innerHTML = kw && totalExpired
+        ? `<div class="empty dim">// 已过期的账号中没有匹配「${escapeHtml(kw)}」的</div>`
+        : '<div class="empty dim">// ✓ 当前没有登录凭据失效的账号</div>'
+      return
+    }
     box.innerHTML = `<div class="empty dim">// 没有匹配「${escapeHtml(accountsSearch.trim())}」的账号</div>`
     return
   }
 
+  // 分页：按筛选后的结果集切片，页码越界时收敛到最后一页
+  const size = accountsPageSize
+  const totalPages = Math.max(1, Math.ceil(shown.length / size))
+  if (accountsPage > totalPages) accountsPage = totalPages
+  if (accountsPage < 1) accountsPage = 1
+  const start = (accountsPage - 1) * size
+  const pageItems = shown.slice(start, start + size)
+  renderAccountsPager(shown.length, totalPages)
+
   box.innerHTML = ''
-  shown.forEach(acct => {
+  pageItems.forEach(acct => {
     const div = document.createElement('div')
     div.className = 'account-item'
     // 昵称（完整，后端已按面板授权返回）显示在 userid 左侧；无昵称时保持原布局
@@ -1177,11 +1271,62 @@ $('#btn-run-admin-toggle').addEventListener('click', () => {
   }
 })
 
-/* 账号搜索：按昵称或酷狗ID 过滤 */
+/* 账号搜索：按昵称或酷狗ID 过滤；结果集变了，页码回到第 1 页 */
 $('#accounts-search').addEventListener('input', ev => {
   accountsSearch = ev.target.value
+  accountsPage = 1
   clearTimeout($('#accounts-search')._t)
   $('#accounts-search')._t = setTimeout(renderAccountList, 120)
+})
+
+/* 「只看已过期」开关：与搜索框叠加生效，点击即切换并立即重绘；结果集变了，回到第 1 页 */
+$('#btn-accounts-expired').addEventListener('click', () => {
+  accountsOnlyExpired = !accountsOnlyExpired
+  accountsPage = 1
+  renderAccountList()
+})
+
+/* 分页：上一页 / 下一页 / 每页条数（20、50、100），每页条数记忆在 localStorage */
+
+/**
+ * 翻页后把页面滚回顶部。
+ * 一页 20 条时列表本身就能超出屏幕，翻页后视口往往停在上页末尾，
+ * 不回到顶部会让人以为「点了下一页但内容没变」。
+ */
+function scrollAccountsToTop() {
+  // 尊重系统的「减少动态效果」偏好：该设置打开时直接跳转，不做平滑滚动
+  let behavior = 'auto'
+  try {
+    if (!window.matchMedia || !window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      behavior = 'smooth'
+    }
+  } catch { /* matchMedia 不可用时保持 auto */ }
+  try {
+    window.scrollTo({ top: 0, behavior })
+  } catch {
+    window.scrollTo(0, 0) // 不支持配置对象的旧实现
+  }
+}
+
+$('#btn-accounts-prev').addEventListener('click', () => {
+  if (accountsPage > 1) {
+    accountsPage -= 1
+    renderAccountList()
+  }
+})
+$('#btn-accounts-next').addEventListener('click', () => {
+  accountsPage += 1
+  renderAccountList() // 越界由 renderAccountList 收敛到最后一页
+  scrollAccountsToTop()
+})
+$('#accounts-page-size').addEventListener('change', ev => {
+  const size = parseInt(ev.target.value, 10)
+  if (!ACCOUNTS_PAGE_SIZES.includes(size)) return
+  accountsPageSize = size
+  // 每页条数变化后总页数随之改变，直接回到第 1 页，避免页码语义突变带来的困惑
+  accountsPage = 1
+  try { localStorage.setItem(ACCOUNTS_PAGE_SIZE_KEY, String(size)) } catch { /* 隐私模式下写不进去，忽略 */ }
+  renderAccountList()
 })
 
 /* ────────────── 账号过期清单（独立小窗口） ────────────── */

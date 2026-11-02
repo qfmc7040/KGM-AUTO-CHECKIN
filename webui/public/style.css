@@ -399,6 +399,33 @@ select.input { width: auto; min-width: 80px; }
   border-color: var(--green);
 }
 
+/* 「只看已过期」筛选按钮：未激活时是普通 ghost 按钮，
+   激活后（aria-pressed=true）用红色描边 + 实心底，与「⚠ 过期」的语义一致 */
+#btn-accounts-expired[aria-pressed="true"] {
+  color: var(--red);
+  border-color: var(--red);
+  background: rgba(248, 81, 73, 0.12);
+}
+#btn-accounts-expired[aria-pressed="true"]:hover:not(:disabled) {
+  color: var(--red);
+  border-color: var(--red);
+  box-shadow: 0 0 12px rgba(248, 81, 73, 0.2);
+}
+
+/* 账号列表分页栏：紧贴列表下方，用虚线分隔，避免和列表项混在一起 */
+.pager {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border-light);
+}
+.pager .btn { padding: 6px 12px; font-size: 12px; }
+#accounts-page-info { font-size: 12px; }
+#accounts-page-size { width: auto; min-width: 72px; padding: 6px 8px; font-size: 12px; }
+
 /* ANSI 颜色 */
 .c-red { color: var(--red); }
 .c-green { color: var(--green); }

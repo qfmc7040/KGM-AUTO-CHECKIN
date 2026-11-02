@@ -162,10 +162,25 @@
         <div class="row">
           <input id="accounts-search" class="input" type="search"
                  placeholder="搜索昵称或酷狗ID…" autocomplete="off" />
+          <!-- 一键筛选：只看登录凭据已失效（酷狗返回 20018、需重新登录）的账号；与搜索框叠加生效 -->
+          <button id="btn-accounts-expired" class="btn ghost" aria-pressed="false"
+                  title="只看登录凭据已失效（需重新扫码/手机号重新登录）的账号">[ ⚠ 只看已过期 ]</button>
           <span id="accounts-search-count" class="dim"></span>
         </div>
         <div id="account-list">
           <div class="empty dim">// 加载中…</div>
+        </div>
+        <!-- 分页栏：筛选后的结果按页渲染，避免一次塞入全部账号；每页条数记忆在 localStorage -->
+        <div id="accounts-pager" class="pager" hidden>
+          <button id="btn-accounts-prev" class="btn ghost" title="上一页">[ ‹ 上一页 ]</button>
+          <span id="accounts-page-info" class="dim"></span>
+          <button id="btn-accounts-next" class="btn ghost" title="下一页">[ 下一页 › ]</button>
+          <span class="inline-label">每页</span>
+          <select id="accounts-page-size" class="input narrow" title="每页显示多少条">
+            <option value="20">20</option>
+            <option value="50">50</option>
+            <option value="100">100</option>
+          </select>
         </div>
         <div class="row lock-row">
           <span id="accounts-who" class="dim"></span>
