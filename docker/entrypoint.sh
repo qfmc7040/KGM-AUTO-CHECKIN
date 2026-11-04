@@ -1,6 +1,6 @@
 #!/bin/sh
 # kgcheckin 容器入口脚本：
-# 1. 以 root 启动时，先把挂载卷 data 目录的属主修正为 PUID:PGID，再用 su-exec 降权执行 CMD；
+# 1. 以 root 启动时，先把挂载卷 data 目录的属主修正为 PUID:PGID，再降权执行 CMD；
 #    PUID/PGID 留空时自动沿用 data 目录现有属主，目录不存在或属主为 root 时回落 1000:1000。
 #    这样 fork 后首次 `docker compose up`（./data 由守护进程以 root 创建）也能直接写入凭据，
 #    无需用户手动 chown，更不必 chmod 777（data 内是完整登录 token）。
@@ -15,6 +15,9 @@
 #   （/proc/<pid>/environ），因此 WebUI 模式（webui/server.js）不再走该路径，
 #   而是通过 stdin 把凭据传给签到子进程。
 set -e
+
+# 脚本自身所在目录（镜像内为 /usr/local/bin），用于定位同目录的降权执行器
+SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 DATA_DIR="${DATA_DIR:-$(dirname "${USERINFO_FILE:-/app/data/userinfo.json}")}"
 
@@ -56,8 +59,17 @@ if [ "$(id -u)" = "0" ]; then
   fi
 
   # ── 降权执行 ──
-  # 容器内没有该 uid 的 passwd 条目也没关系，su-exec 直接按数字 uid/gid 切换。
-  exec su-exec "$PUID:$PGID" "$@"
+  # 容器内没有该 uid 的 passwd 条目也没关系，按数字 uid/gid 直接切换。
+  # 用镜像自带的 node 执行降权（见 entrypoint-drop.mjs）：
+  #   alpine 官方镜像没有 su-exec/gosu，`apk add` 在部分网络下会因访问不到
+  #   dl-cdn.alpinelinux.org 而失败，导致整个构建中断；node 无需额外安装。
+  DROP="$SELF_DIR/entrypoint-drop.mjs"
+  if [ ! -f "$DROP" ]; then
+    echo "[entrypoint] ⚠ 缺少降权脚本 $DROP，将以 root 运行业务进程" >&2
+    echo "[entrypoint]   请重新构建镜像：docker compose up -d --build" >&2
+    exec "$@"
+  fi
+  exec node "$DROP" "$PUID:$PGID" "$@"
 fi
 
 # 非 root 启动（docker run --user / compose 的 user:）：属主已由调用方决定，直接执行
