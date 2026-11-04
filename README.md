@@ -186,9 +186,7 @@ docker compose run --rm kgcheckin node qrcodeLogin.js wait  # 命令行等待扫
 docker compose pull && docker compose up -d --build         # 拉取新代码后更新
 ```
 
-<details>
-
-<summary>⚠️Github Actions部署教程(点击展开)⚠️</summary>
+<summary>⚠️Github Actions部署教程⚠️</summary>
 
 1. Fork 本仓库
 
@@ -304,8 +302,6 @@ API源代码来自 [MakcRe/KuGouMusicApi](https://github.com/MakcRe/KuGouMusicAp
   ### 步骤四
    
    ![步骤四](./imgs/步骤四.jpg)
-
-</details>
 
 ## 致谢
 
