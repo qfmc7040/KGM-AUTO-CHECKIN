@@ -160,7 +160,7 @@ docker compose run --rm kgcheckin node scheduler.js once   # 或命令行方式�
 | `CHECKIN_CONCURRENCY` | 全部并行 | 多账号签到并发路数：默认有几个账号就几路全部并行；设 N 限最多 N 路；设 1 = 逐个串行（每账号内部仍保持 30s 的 VIP 领取节奏） |
 | `USERINFO` | - | 登录凭据（JSON 数组），与 Actions 的 Secret 格式一致；与凭据文件二选一 |
 | `USERINFO_FILE` | `/app/data/userinfo.json` | 凭据文件路径（位于挂载卷内，勿改）；入口脚本会自动读取并作为 `USERINFO` 注入 |
-| 通知渠道变量 | - | `WECOM_BOT_KEY`、`DINGTALK_BOT_KEY`、`FEISHU_BOT_KEY`、`TG_BOT_TOKEN` 等，与下文 Actions 通知 Secret 同名，建议写在 `.env` 中 |
+| [通知渠道变量](https://github.com/qfmc7040/KGM-AUTO-CHECKIN/edit/main/README.md#%E9%80%9A%E7%9F%A5%E6%B8%A0%E9%81%93%E5%8F%98%E9%87%8F) | - | `WECOM_BOT_KEY`、`DINGTALK_BOT_KEY`、`FEISHU_BOT_KEY`、`TG_BOT_TOKEN` 等，与下文 Actions 通知 Secret 同名，建议写在 `.env` 中 |
 | `PAT` + `GITHUB_REPOSITORY` | - | 可选。仅当还想把每周刷新的 token 同步回 GitHub 仓库 Secret 时才需要 |
 
 ### 数据与安全
@@ -186,7 +186,7 @@ docker compose run --rm kgcheckin node qrcodeLogin.js wait  # 命令行等待扫
 docker compose pull && docker compose up -d --build         # 拉取新代码后更新
 ```
 
-<summary>⚠️Github Actions部署教程⚠️</summary>
+## <summary>⚠️Github Actions部署教程⚠️</summary>
 
 1. Fork 本仓库
 
@@ -226,6 +226,8 @@ docker compose pull && docker compose up -d --build         # 拉取新代码后
 1. （可选）配置运行结果通知
 
    在仓库 Settings → Secrets and variables → Actions 中添加对应渠道的 Secret，签到完成后将自动推送结果通知。支持以下渠道（全部可选，配置多个将同时发送）：
+
+### 通知渠道变量
 
    | 通知渠道 | Secret 变量名 | 说明 |
    |---------|-------------|------|
