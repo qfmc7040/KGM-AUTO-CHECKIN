@@ -166,6 +166,23 @@ $$('.tab').forEach(tab => {
 
 /* ────────────────── 状态徽章 / 账号列表 ────────────────── */
 
+/** 凭据目录不可写时的修复提示（服务端 /api/status 的 credential 字段） */
+function credentialFixHint() {
+  const c = lastStatus && lastStatus.credential
+  const uid = (c && c.uid) || 1000
+  const gid = (c && c.gid) || 1000
+  return `凭据未保存：data 目录不可写（${(c && c.reason) || '权限不足'}）。`
+    + `请在宿主机执行 sudo chown -R ${uid}:${gid} ./data 后重启容器，`
+    + `或在 .env 设置 PUID=${uid} / PGID=${gid}（不要用 chmod 777）。`
+}
+
+/** 登录成功提示文案：saved=false 时如实说明「没保存」而不是假装成功 */
+function loginResultText(r) {
+  return r.saved
+    ? `// ✓ 登录成功，账号 ${r.userid} 已保存`
+    : `// ⚠ 登录成功，但账号 ${r.userid} 的凭据未保存（data 目录不可写）`
+}
+
 function setChip(id, text, cls) {
   const el = $(id)
   el.textContent = text
@@ -185,7 +202,14 @@ async function refreshStatus() {
   lastStatus = s
 
   const n = s.accountCount
-  setChip('#chip-cred', `▮ 凭据: ${n > 0 ? `${n} 个账号` : '未配置'}`, n > 0 ? 'ok' : 'warn')
+  const cred = s.credential
+  const writable = !cred || cred.writable !== false
+  if (!writable) {
+    // 目录不可写比「账号数量」重要得多：凭据根本存不住，必须优先红字示警
+    setChip('#chip-cred', '▮ 凭据: 目录不可写', 'err')
+  } else {
+    setChip('#chip-cred', `▮ 凭据: ${n > 0 ? `${n} 个账号` : '未配置'}`, n > 0 ? 'ok' : 'warn')
+  }
 
   const sched = s.schedule
   setChip(
@@ -810,9 +834,16 @@ function startQrPolling() {
         } else if (r.status === 4) {
           item.done = true
           item.card.classList.add('done')
-          statusEl.textContent = `✓ 登录成功 · 账号 ${r.userid}${r.saved ? ' 已保存' : ''}`
-          statusEl.className = 'qr-status ok'
-          toast(`账号 ${r.userid} 登录成功`, 'ok')
+          statusEl.textContent = r.saved
+            ? `✓ 登录成功 · 账号 ${r.userid} 已保存`
+            : `⚠ 登录成功 · 账号 ${r.userid} 凭据未保存`
+          statusEl.className = r.saved ? 'qr-status ok' : 'qr-status err'
+          // toast 只保留一条：未保存时把修复提示直接说清楚，别用两条互相覆盖
+          if (r.saved) {
+            toast(`账号 ${r.userid} 登录成功`, 'ok')
+          } else {
+            toast(credentialFixHint(), 'err')
+          }
           refreshStatus()
           // 刚拿到这个账号的登录凭据：此刻是请求用户预留通知邮箱的最佳时机
           if (r.bindTicket) askEmailBind({ userid: r.userid, ticket: r.bindTicket })
@@ -861,9 +892,14 @@ $('#btn-phone-login').addEventListener('click', async () => {
   $('#phone-hint').textContent = '// 登录中…'
   try {
     const r = await api('/api/phone/login', { method: 'POST', body: JSON.stringify({ phone, code }) })
-    $('#phone-hint').textContent = `// ✓ 登录成功，账号 ${r.userid} 已保存`
+    $('#phone-hint').textContent = loginResultText(r)
+    $('#phone-hint').className = r.saved ? 'dim' : 'dim err'
     $('#code').value = ''
-    toast(`账号 ${r.userid} 登录成功`, 'ok')
+    if (r.saved) {
+      toast(`账号 ${r.userid} 登录成功`, 'ok')
+    } else {
+      toast(credentialFixHint(), 'err')
+    }
     refreshStatus()
     // 同扫码登录：登录成功即邀请预留通知邮箱（票根 10 分钟内有效）
     if (r.bindTicket) askEmailBind({ userid: r.userid, ticket: r.bindTicket })

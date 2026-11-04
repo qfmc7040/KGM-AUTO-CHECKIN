@@ -49,7 +49,7 @@ import { spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
 
 import { close_api, delay, send, startService, waitForApi } from '../utils/utils.js'
-import { upsertUser, writeUserinfoFile, parseUserinfoJson } from '../utils/userinfo.js'
+import { upsertUser, writeUserinfoFile, parseUserinfoJson, probeDirWritable } from '../utils/userinfo.js'
 import { buildDeviceCookie, generateDevice, migrateUserinfoDevice } from '../utils/device.js'
 import { maskEmail, maskIdentifier, summarizeResponse } from '../utils/safeLog.js'
 import { printGreen, printMagenta, printRed, printYellow } from '../utils/colorOut.js'
@@ -366,6 +366,32 @@ if (!process.env.USERINFO_FILE) {
 }
 const USERINFO_FILE = process.env.USERINFO_FILE
 
+/**
+ * 凭据目录可写性自检结果（启动时探测一次，之后在每次写失败后重新探测）。
+ * 目的：把「扫码登录成功但没保存」的沉默失败，变成启动横幅 + 顶栏徽章 + 登录弹窗
+ * 三处都能看见的明确提示，并直接给出宿主机侧的修复命令。
+ * Docker 场景的典型成因：宿主机 ./data 由 sudo 或 Docker 守护进程以 root 创建，
+ * 容器内普通用户（uid 1000）既不能建 .tmp 也不能 rename。
+ */
+const dataDir = path.dirname(USERINFO_FILE)
+const dataWritable = probeDirWritable(dataDir)
+
+/** 重新探测可写性（写失败后调用，避免一次探测结果长期误导） */
+function recheckDataWritable() {
+  const r = probeDirWritable(dataDir)
+  dataWritable.writable = r.writable
+  dataWritable.reason = r.reason
+  return dataWritable.writable
+}
+
+/** 当前进程 uid/gid，用于给出准确的 chown 命令（非 Linux 环境下 getuid 不存在，回落 1000） */
+function currentUidGid() {
+  return {
+    uid: typeof process.getuid === 'function' ? process.getuid() : 1000,
+    gid: typeof process.getgid === 'function' ? process.getgid() : 1000,
+  }
+}
+
 const BOOT_AT = new Date().toISOString()
 
 // ────────────────────────── 凭据文件 ──────────────────────────
@@ -389,7 +415,10 @@ function readUserinfoRaw() {
 }
 
 function saveUserinfo(arr) {
-  return writeUserinfoFile(JSON.stringify(arr))
+  const ok = writeUserinfoFile(JSON.stringify(arr))
+  // 写失败后立刻复测目录：若是权限问题，前端徽章与登录提示会据此给出修复命令
+  if (!ok) recheckDataWritable()
+  return ok
 }
 
 /**
@@ -836,6 +865,8 @@ function saveAccountsAuth(map) {
     return true
   } catch (e) {
     printRed(`[webui] 写入账号密码文件失败：${e.message}`)
+    // 与凭据文件同一目录，写失败多半也是权限问题：复测后让前端徽章同步显示
+    recheckDataWritable()
     try { fs.rmSync(tmp, { force: true }) } catch { /* 忽略 */ }
     return false
   }
@@ -1111,6 +1142,14 @@ app.get('/api/status', wrap(async (req, res) => {
     accountCount: readUserinfo().length,
     accountsLockEnabled: true,
     apiServiceRunning: loginApi.running(),
+    // 凭据目录是否可写：前端据此在顶栏徽章与登录成功提示里如实告知「没保存」及原因
+    credential: {
+      file: USERINFO_FILE,
+      dir: dataDir,
+      writable: dataWritable.writable,
+      reason: dataWritable.reason || '',
+      ...currentUidGid(),
+    },
   })
 }))
 
@@ -1433,7 +1472,7 @@ app.post('/api/phone/login', wrap(async (req, res) => {
     if (saved) clearInvalidCredentialMark(loggedUserid)
     pendingPhoneDevices.delete(phone)
     const userid = maskIdentifier(loggedUserid)
-    printGreen(`[webui] 手机号登录成功，账号 ${userid} 已保存`)
+    printGreen(`[webui] 手机号登录成功，账号 ${userid} ${saved ? '已保存到凭据文件' : '获取成功（写文件失败，凭据未持久化）'}`)
     // 票根：前端拿到它就能立刻为该账号绑定通知邮箱
     return res.json({ ok: true, userid, saved, bindTicket: issueBindTicket(loggedUserid) })
   }
@@ -1982,6 +2021,19 @@ app.listen(WEBUI_PORT, () => {
   printYellow(`  计划任务: ${cron.validate(SCHEDULE) ? SCHEDULE : `${SCHEDULE} (无效！定时签到未启用)`}（${TIMEZONE}）`)
   printYellow(`  下次执行: ${nextRuns(1)[0] || '-'}`)
   printYellow(`  凭据文件: ${USERINFO_FILE}（${readUserinfo().length} 个账号）`)
+  if (dataWritable.writable) {
+    printGreen(`  凭据目录: ${dataDir} 可写`)
+  } else {
+    // 沉默失败是这个问题最坑的地方：登录明明成功，凭据却没落盘，重启就丢。
+    // 启动时就红字报出来，并直接给宿主机侧可执行的修复命令。
+    const { uid, gid } = currentUidGid()
+    printRed(`  ⚠ 凭据目录不可写: ${dataDir}（${dataWritable.reason || '未知原因'}）`)
+    printRed('    扫码/手机号登录会成功，但凭据写不进 userinfo.json，重启即丢；')
+    printRed('    手动签到也会读不到账号。请在宿主机执行下面这条命令后重启容器：')
+    printRed(`      sudo chown -R ${uid}:${gid} ./data`)
+    printRed(`    或在该项目的 .env 中设置 PUID=${uid} / PGID=${gid} 后重新 up（入口脚本会自动修正属主）。`)
+    printRed('    不要用 chmod 777：data 目录里是完整登录 token。')
+  }
   printYellow(`  访问密码: ${WEBUI_PASSWORD ? '已启用' : '未启用（仅建议在可信内网使用）'}`)
   printYellow(`  账号管理: 每账号独立密码（scrypt）· admin ${ACCOUNTS_PASSWORD || readAccountsAuth().admin ? '已启用' : '未启用'} · 账号 ${ACCOUNTS_MAX_ATTEMPTS} 次 / IP ${ACCOUNTS_IP_MAX_ATTEMPTS} 次错误锁定 ${ACCOUNTS_LOCK_MINUTES} 分钟`)
   if (ACCOUNTS_DISABLE_ID_DEFAULT) {

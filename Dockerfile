@@ -29,12 +29,21 @@ COPY webui ./webui
 
 # ── 运行时目录与权限 ──
 # /app/data：挂载卷（userinfo.json 凭据、二维码输出）
+#
+# 入口脚本以 root 启动（不再用 USER node），依次做三件事：
+#   1. 把挂载卷 data 目录的属主修正为 PUID:PGID（未指定时沿用宿主目录现有属主，
+#      再回落到 1000:1000）；
+#   2. 用 su-exec 降权到该 uid/gid 执行 CMD，业务进程本身仍以普通用户运行；
+#   3. chown 失败（NFS root-squash / 只读挂载）只警告不阻断，由 WebUI 的可写自检
+#      把原因和修复命令报给用户。
+# 这样即使 ./data 是 sudo 或 Docker 守护进程以 root 创建的（fork 后首次 up 的典型情况），
+# 容器内普通用户也能写入 userinfo.json，用户无需手动 chown，更不该 chmod 777
+# （data 里是完整登录 token）。
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh \
+RUN apk add --no-cache su-exec \
+    && chmod +x /usr/local/bin/entrypoint.sh \
     && mkdir -p /app/data \
     && chown -R node:node /app/data
-
-USER node
 
 # 凭据文件与二维码输出统一放到挂载卷内
 ENV USERINFO_FILE=/app/data/userinfo.json \

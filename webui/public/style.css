@@ -158,6 +158,8 @@ main {
 }
 .comment { color: var(--magenta); }
 .dim { color: var(--dim); }
+/* 登录结果提示：凭据未保存等需要用户处理的情况用红色（字号沿用 .dim） */
+.dim.err { color: var(--red); }
 .tip {
   margin-top: 16px;
   font-size: 12px;

@@ -52,6 +52,44 @@ function upsertUser(userinfo, loginUser, append) {
 }
 
 /**
+ * 探测目录是否可写：真的写一个临时文件再删掉，而不是只看 stat 权限位。
+ * 只读挂载（ro）、NFS root-squash、属主不对（宿主机 ./data 被 sudo 或 Docker
+ * 守护进程以 root 创建的典型情况）都会在这里表现为 EACCES/EROFS——正好对应
+ * 「扫码登录成功但凭据没保存」这一现象。
+ * @param {string} dir 目标目录（不存在时会尝试创建）
+ * @returns {{ writable: boolean, reason: string }} reason 为错误码或错误信息
+ */
+function probeDirWritable(dir) {
+  const probe = path.join(dir, `.write-probe-${process.pid}-${Date.now()}`)
+  try {
+    fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(probe, 'ok', 'utf8')
+    fs.rmSync(probe, { force: true })
+    return { writable: true, reason: '' }
+  } catch (error) {
+    try { fs.rmSync(probe, { force: true }) } catch { /* 忽略清理失败 */ }
+    return { writable: false, reason: error.code || error.message }
+  }
+}
+
+/**
+ * 权限类错误的修复提示（仅 Docker 挂载卷场景有意义）。
+ * @param {string} file
+ * @param {Error} error
+ */
+function printWritePermissionHint(file, error) {
+  const code = error && error.code
+  if (code !== 'EACCES' && code !== 'EPERM' && code !== 'EROFS') return
+  const uid = typeof process.getuid === 'function' ? process.getuid() : 1000
+  const gid = typeof process.getgid === 'function' ? process.getgid() : 1000
+  printRed('  原因：凭据目录对当前运行用户不可写（权限 / 只读挂载）。')
+  printRed('  在宿主机执行下面这条命令修正属主后重启容器（不要用 chmod 777：data 内是完整 token）：')
+  printRed(`    sudo chown -R ${uid}:${gid} ./data`)
+  printRed(`  或在该项目的 .env 中显式设置 PUID=${uid} / PGID=${gid} 后重新 up。`)
+  printYellow(`  （当前进程 uid:gid = ${uid}:${gid}，目标文件 ${file}）`)
+}
+
+/**
  * 将 userinfo JSON 原子化写入本地凭据文件（Docker 部署挂载卷）。
  * 未配置 USERINFO_FILE 时不做任何事，返回 false。
  * @param {string} userinfoJSON
@@ -70,6 +108,7 @@ function writeUserinfoFile(userinfoJSON) {
   } catch (error) {
     printRed(`写入 USERINFO 文件失败 (${file})`)
     console.dir(sanitizeForLog({ message: error.message }), { depth: null })
+    printWritePermissionHint(file, error)
     try { fs.rmSync(tmp, { force: true }) } catch { /* 忽略清理失败 */ }
     return false
   }
@@ -123,4 +162,4 @@ function printUserinfoFallback(userinfoJSON) {
   }
 }
 
-export { upsertUser, saveUserinfo, writeUserinfoFile, parseUserinfoJson }
+export { upsertUser, saveUserinfo, writeUserinfoFile, parseUserinfoJson, probeDirWritable }

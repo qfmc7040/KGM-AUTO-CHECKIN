@@ -71,6 +71,22 @@ docker compose logs -f        # 查看日志，Ctrl+C 退出（容器继续运�
 
 容器启动后同时具备 **WebUI 控制台 + 定时自动签到**，无需任何其他配置。
 
+> [!NOTE]
+> **关于 `./data` 目录属主（"登录成功但凭据没保存"的根因）**
+>
+> 凭据目录 `./data` 是宿主机上的 bind mount。如果它由 `sudo` 或 Docker 守护进程以 `root` 创建
+> （**fork 后首次 `up` 必然如此**：`data/` 已被 `.gitignore` 忽略，克隆下来并不存在），容器内的普通用户就写不进去。
+> 表现是：**扫码 / 手机号登录都显示成功，但账号没保存，重启后消失**；`data/` 下其它文件（公告、签到状态）同样写失败。
+>
+> 本版本已自动处理：容器以 root 启动，入口脚本先把 `./data` 属主修正为 `PUID:PGID`，再**降权**到该身份运行业务进程
+> （WebUI 与签到**不会**以 root 运行）。`PUID` / `PGID` 留空时自动沿用 `./data` 现有属主；目录不存在或属主是 `root`
+> 时回落到 `1000:1000`。
+>
+> - NAS / 非 1000 uid 的用户：在 `.env` 里显式写 `PUID` / `PGID`（Linux 用 `id -u` / `id -g` 取值），否则属主会被改成 1000
+> - 从旧版本升级（`./data` 里已有 root 所有的文件）：`docker compose up -d --build` 重建即可，入口脚本会一并修正
+> - 仍有问题看启动横幅的「凭据目录」一行，它会把需要执行的 `chown` 命令原样打出来；也可手动 `sudo chown -R <uid>:<gid> ./data`
+> - **不要**用 `chmod 777` 绕过：`data/` 里是完整登录 token，等价于账号密码
+
 容器内置健康检查（每 30 秒探测 WebUI 的 `/healthz`，该端点不受 `WEBUI_PASSWORD` 保护），可用 `docker ps` 查看状态：
 
 ```bash
@@ -150,6 +166,7 @@ docker compose run --rm kgcheckin node scheduler.js once   # 或命令行方式�
 | `ACCOUNTS_MAX_ATTEMPTS` / `ACCOUNTS_LOCK_MINUTES` | `3` / `5` | 可选覆盖防爆破策略（单账号最大错误次数 / 锁定时长） |
 | `ACCOUNTS_IP_MAX_ATTEMPTS` | `ACCOUNTS_MAX_ATTEMPTS × 5` | 单个 IP 的最大错误次数（放宽以免同 NAT 用户互相影响） |
 | `ACCOUNTS_DISABLE_ID_DEFAULT` | `false` | 设为 `true` 关闭「默认密码=酷狗ID」，未设密码的账号须由 admin 先设置密码（公网部署推荐） |
+| `PUID` / `PGID` | 自动 | 容器内运行业务进程的 uid / gid。留空时自动沿用宿主 `./data` 现有属主（目录不存在或属主为 root 则用 `1000:1000`）；NAS 或非 1000 用户请显式指定。入口脚本启动时据此修正 `./data` 属主并降权 |
 | `WEBUI_TRUST_PROXY` | - | 部署在反向代理后（Nginx/Caddy/Cloudflare Tunnel 等）时**必须**设为 `1`，以信任 `X-Forwarded-For` 取真实 IP（也可填代理跳数，如 `2`）；未设置或设为 `0`/`false` 则不信任（防伪造绕过防爆破），但外部请求会被视为同一个代理内网地址，账号防爆破的 IP 桶会互相拖累、二维码限流会被豁免 |
 | `WEBUI_PHONE_SEND_GLOBAL_LIMIT` | `20/60` | 发送短信验证码的全局限流（"次数/分钟"，即全服务每小时 20 次），防换号刷量；不依赖来源 IP；设为 `0/1` 关闭 |
 | `WEBUI_PHONE_SEND_PHONE_LIMIT` | `2/1440` | 发送短信验证码的手机号限流（每号 24 小时 2 次），防止本服务被当作短信轰炸机 |
@@ -170,7 +187,9 @@ docker compose run --rm kgcheckin node scheduler.js once   # 或命令行方式�
 - 每周日签到时候酷狗 token 会自动刷新并**写回 `data/userinfo.json`**，凭据长期有效，无需手动维护
 - `data/checkin_state.json` 记录当日已完成签到的账号，供手动触发"立即签到"时跳过（按北京时间日期滚动，跨天自动失效；删除该文件可强制重新执行）
 - 日期/星期计算固定按北京时间处理，与容器 `TZ` 无关；调度时区由 `CRON_TIMEZONE` 控制
-- 首次 `up` 后若报权限错误，执行 `sudo chown -R 1000:1000 ./data`（容器以 uid 1000 运行）后重启
+- `data/` 目录属主由容器入口脚本在启动时自动修正（见上方「关于 `./data` 目录属主」），一般无需手工 chown；
+  启动横幅的「凭据目录」一行会直接显示是否可写，不可写时给出具体修复命令
+- 凭据写失败不会静默：顶栏徽章显示「凭据: 目录不可写」，扫码 / 手机号登录会提示「凭据未保存」而不是假装成功
 
 ### 常用命令速查
 

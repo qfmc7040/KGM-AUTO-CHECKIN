@@ -30,6 +30,13 @@ services:
     ports:
       - "14725:3000"                    # WebUI 控制台，按需改为 "8080:3000" 等
     environment:
+      # ── 容器内运行身份 ──
+      # 容器以 root 启动，入口脚本先把挂载卷 ./data 的属主修正为 PUID:PGID，
+      # 再降权到该身份执行（业务进程始终是普通用户）。
+      # 留空 = 自动沿用宿主 ./data 目录现有属主，目录不存在/属主为 root 时用 1000:1000。
+      # 需要指定时填宿主机当前用户的 id -u / id -g（NAS 用户尤其要填对）。
+      PUID: ${PUID:-}
+      PGID: ${PGID:-}
       # ── WebUI ──
       WEBUI_PORT: "3000"
       WEBUI_PASSWORD: ${WEBUI_PASSWORD:-}   # 可选访问密码，在 .env 中设置；公网暴露时强烈建议启用
